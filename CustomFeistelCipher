@@ -1,0 +1,505 @@
+package encryption;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.Arrays;
+import java.util.Base64;
+
+/**
+ * CustomFeistelCipher - An implementation of a custom encryption algorithm
+ * based on a Feistel network structure with modern cryptographic primitives
+ * 
+ * NOTE: This is for educational purposes only. For real security needs,
+ * use established algorithms and libraries that have been thoroughly vetted.
+ */
+public class CustomFeistelCipher {
+    
+    // Algorithm parameters
+    private static final int BLOCK_SIZE = 16; // 128 bits (in bytes)
+    private static final int ROUNDS = 16;     // Number of Feistel rounds
+    private static final int KEY_SIZE = 32;   // 256 bits (in bytes)
+    private static final int IV_SIZE = 16;    // 128 bits (in bytes)
+    private static final int SALT_SIZE = 16;  // 128 bits (in bytes)
+    
+    // Operation modes
+    public enum Mode {
+        ECB, // Electronic Codebook - NOT recommended for most uses
+        CBC, // Cipher Block Chaining
+        CTR  // Counter Mode
+    }
+    
+    private byte[] masterKey;
+    private SecureRandom secureRandom;
+    private Mode defaultMode;
+    
+    /**
+     * Constructor
+     * 
+     * @param password The password to derive the key from
+     * @param mode The cipher mode to use
+     */
+    public CustomFeistelCipher(String password, Mode mode) throws NoSuchAlgorithmException {
+        this.secureRandom = new SecureRandom();
+        this.defaultMode = mode;
+        
+        // Generate a salt for key derivation
+        byte[] salt = new byte[SALT_SIZE];
+        secureRandom.nextBytes(salt);
+        
+        // Derive the key from the password using PBKDF2-like approach
+        this.masterKey = deriveKey(password, salt);
+    }
+    
+    /**
+     * Encrypt a message
+     * 
+     * @param plaintext The message to encrypt
+     * @return Encrypted data in Base64 format
+     */
+    public String encrypt(String plaintext) throws NoSuchAlgorithmException {
+        // Convert plaintext to bytes
+        byte[] plaintextBytes = plaintext.getBytes(StandardCharsets.UTF_8);
+        
+        // Generate IV for block modes
+        byte[] iv = new byte[IV_SIZE];
+        secureRandom.nextBytes(iv);
+        
+        // Encrypt
+        byte[] ciphertext = encrypt(plaintextBytes, masterKey, iv, defaultMode);
+        
+        // Combine IV and ciphertext for output
+        byte[] output = new byte[iv.length + ciphertext.length];
+        System.arraycopy(iv, 0, output, 0, iv.length);
+        System.arraycopy(ciphertext, 0, output, iv.length, ciphertext.length);
+        
+        // Convert to Base64 for easy transport
+        return Base64.getEncoder().encodeToString(output);
+    }
+    
+    /**
+     * Decrypt a message
+     * 
+     * @param ciphertextBase64 The encrypted message in Base64 format
+     * @return The decrypted plaintext
+     */
+    public String decrypt(String ciphertextBase64) throws NoSuchAlgorithmException {
+        // Decode from Base64
+        byte[] combined = Base64.getDecoder().decode(ciphertextBase64);
+        
+        // Extract IV and ciphertext
+        byte[] iv = new byte[IV_SIZE];
+        byte[] ciphertext = new byte[combined.length - IV_SIZE];
+        System.arraycopy(combined, 0, iv, 0, IV_SIZE);
+        System.arraycopy(combined, IV_SIZE, ciphertext, 0, ciphertext.length);
+        
+        // Decrypt
+        byte[] plaintextBytes = decrypt(ciphertext, masterKey, iv, defaultMode);
+        
+        // Convert to string
+        return new String(plaintextBytes, StandardCharsets.UTF_8);
+    }
+    
+    /**
+     * Main encryption implementation
+     */
+    private byte[] encrypt(byte[] plaintext, byte[] key, byte[] iv, Mode mode) 
+            throws NoSuchAlgorithmException {
+        
+        // Pad the plaintext to a multiple of the block size
+        byte[] paddedPlaintext = padData(plaintext);
+        
+        // Prepare output buffer
+        byte[] ciphertext = new byte[paddedPlaintext.length];
+        
+        // Generate round keys from the master key
+        byte[][] roundKeys = generateRoundKeys(key);
+        
+        // Process the plaintext based on the selected mode
+        switch (mode) {
+            case ECB:
+                // Process each block independently (NOT recommended for most uses)
+                for (int i = 0; i < paddedPlaintext.length; i += BLOCK_SIZE) {
+                    byte[] block = new byte[BLOCK_SIZE];
+                    System.arraycopy(paddedPlaintext, i, block, 0, BLOCK_SIZE);
+                    
+                    // Encrypt the block
+                    byte[] encryptedBlock = encryptBlock(block, roundKeys);
+                    
+                    // Copy the encrypted block to the output
+                    System.arraycopy(encryptedBlock, 0, ciphertext, i, BLOCK_SIZE);
+                }
+                break;
+                
+            case CBC:
+                // Each block's encryption depends on the previous block
+                byte[] previousBlock = iv.clone();
+                
+                for (int i = 0; i < paddedPlaintext.length; i += BLOCK_SIZE) {
+                    byte[] block = new byte[BLOCK_SIZE];
+                    System.arraycopy(paddedPlaintext, i, block, 0, BLOCK_SIZE);
+                    
+                    // XOR with previous block (or IV for first block)
+                    for (int j = 0; j < BLOCK_SIZE; j++) {
+                        block[j] ^= previousBlock[j];
+                    }
+                    
+                    // Encrypt the block
+                    byte[] encryptedBlock = encryptBlock(block, roundKeys);
+                    
+                    // Copy the encrypted block to the output
+                    System.arraycopy(encryptedBlock, 0, ciphertext, i, BLOCK_SIZE);
+                    
+                    // Update previous block for next iteration
+                    previousBlock = encryptedBlock;
+                }
+                break;
+                
+            case CTR:
+                // Counter mode - encrypt a counter and XOR with plaintext
+                byte[] counter = iv.clone();
+                
+                for (int i = 0; i < paddedPlaintext.length; i += BLOCK_SIZE) {
+                    // Encrypt the counter
+                    byte[] encryptedCounter = encryptBlock(counter, roundKeys);
+                    
+                    // XOR with plaintext block
+                    for (int j = 0; j < BLOCK_SIZE && i + j < paddedPlaintext.length; j++) {
+                        ciphertext[i + j] = (byte) (paddedPlaintext[i + j] ^ encryptedCounter[j]);
+                    }
+                    
+                    // Increment counter
+                    incrementCounter(counter);
+                }
+                break;
+        }
+        
+        return ciphertext;
+    }
+    
+    /**
+     * Main decryption implementation
+     */
+    private byte[] decrypt(byte[] ciphertext, byte[] key, byte[] iv, Mode mode) 
+            throws NoSuchAlgorithmException {
+        
+        // Prepare output buffer
+        byte[] plaintext = new byte[ciphertext.length];
+        
+        // Generate round keys from the master key
+        byte[][] roundKeys = generateRoundKeys(key);
+        // Reverse the keys for decryption
+        if (mode != Mode.CTR) {
+            reverseRoundKeys(roundKeys);
+        }
+        
+        // Process the ciphertext based on the selected mode
+        switch (mode) {
+            case ECB:
+                // Process each block independently
+                for (int i = 0; i < ciphertext.length; i += BLOCK_SIZE) {
+                    byte[] block = new byte[BLOCK_SIZE];
+                    System.arraycopy(ciphertext, i, block, 0, BLOCK_SIZE);
+                    
+                    // Decrypt the block
+                    byte[] decryptedBlock = mode == Mode.CTR ? 
+                            encryptBlock(block, roundKeys) : // In CTR, encryption = decryption
+                            decryptBlock(block, roundKeys);
+                    
+                    // Copy the decrypted block to the output
+                    System.arraycopy(decryptedBlock, 0, plaintext, i, BLOCK_SIZE);
+                }
+                break;
+                
+            case CBC:
+                // Each block's decryption depends on the previous ciphertext block
+                byte[] previousBlock = iv.clone();
+                
+                for (int i = 0; i < ciphertext.length; i += BLOCK_SIZE) {
+                    byte[] block = new byte[BLOCK_SIZE];
+                    System.arraycopy(ciphertext, i, block, 0, BLOCK_SIZE);
+                    
+                    // Save current ciphertext block for next iteration
+                    byte[] currentBlock = block.clone();
+                    
+                    // Decrypt the block
+                    byte[] decryptedBlock = decryptBlock(block, roundKeys);
+                    
+                    // XOR with previous block (or IV for first block)
+                    for (int j = 0; j < BLOCK_SIZE; j++) {
+                        decryptedBlock[j] ^= previousBlock[j];
+                    }
+                    
+                    // Copy the decrypted block to the output
+                    System.arraycopy(decryptedBlock, 0, plaintext, i, BLOCK_SIZE);
+                    
+                    // Update previous block for next iteration
+                    previousBlock = currentBlock;
+                }
+                break;
+                
+            case CTR:
+                // Counter mode - encrypt a counter and XOR with ciphertext
+                byte[] counter = iv.clone();
+                
+                for (int i = 0; i < ciphertext.length; i += BLOCK_SIZE) {
+                    // Encrypt the counter
+                    byte[] encryptedCounter = encryptBlock(counter, roundKeys);
+                    
+                    // XOR with ciphertext block
+                    for (int j = 0; j < BLOCK_SIZE && i + j < ciphertext.length; j++) {
+                        plaintext[i + j] = (byte) (ciphertext[i + j] ^ encryptedCounter[j]);
+                    }
+                    
+                    // Increment counter
+                    incrementCounter(counter);
+                }
+                break;
+        }
+        
+        // Remove padding
+        return unpadData(plaintext);
+    }
+    
+    /**
+     * Encrypt a single block using Feistel network
+     */
+    private byte[] encryptBlock(byte[] block, byte[][] roundKeys) {
+        if (block.length != BLOCK_SIZE) {
+            throw new IllegalArgumentException("Block size must be " + BLOCK_SIZE + " bytes");
+        }
+        
+        // Split the block into left and right halves
+        int halfSize = BLOCK_SIZE / 2;
+        byte[] left = new byte[halfSize];
+        byte[] right = new byte[halfSize];
+        System.arraycopy(block, 0, left, 0, halfSize);
+        System.arraycopy(block, halfSize, right, 0, halfSize);
+        
+        // Apply Feistel rounds
+        for (int round = 0; round < ROUNDS; round++) {
+            byte[] roundKey = roundKeys[round];
+            
+            // Calculate F(right, roundKey)
+            byte[] f = feistelFunction(right, roundKey);
+            
+            // XOR left with F(right, roundKey)
+            byte[] newLeft = right.clone();
+            byte[] newRight = new byte[halfSize];
+            for (int i = 0; i < halfSize; i++) {
+                newRight[i] = (byte) (left[i] ^ f[i]);
+            }
+            
+            // Update left and right for next round
+            left = newLeft;
+            right = newRight;
+        }
+        
+        // Combine left and right to form the output (swap them at the end)
+        byte[] output = new byte[BLOCK_SIZE];
+        System.arraycopy(right, 0, output, 0, halfSize);
+        System.arraycopy(left, 0, output, halfSize, halfSize);
+        
+        return output;
+    }
+    
+    /**
+     * Decrypt a single block using Feistel network
+     */
+    private byte[] decryptBlock(byte[] block, byte[][] roundKeys) {
+        // Due to the symmetry of Feistel networks, decryption is the same as encryption
+        // but with the round keys used in reverse order.
+        // The round keys should be reversed before calling this method.
+        return encryptBlock(block, roundKeys);
+    }
+    
+    /**
+     * Feistel function for combining right half with round key
+     */
+    private byte[] feistelFunction(byte[] right, byte[] roundKey) {
+        // Create a buffer for input to the hash function
+        byte[] input = new byte[right.length + roundKey.length];
+        System.arraycopy(right, 0, input, 0, right.length);
+        System.arraycopy(roundKey, 0, input, right.length, roundKey.length);
+        
+        try {
+            // Apply SHA-256 hash
+            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+            byte[] hash = sha256.digest(input);
+            
+            // Truncate the hash to match the half-block size
+            byte[] result = new byte[right.length];
+            System.arraycopy(hash, 0, result, 0, right.length);
+            
+            return result;
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-256 algorithm not available", e);
+        }
+    }
+    
+    /**
+     * Generate round keys from the master key
+     */
+    private byte[][] generateRoundKeys(byte[] masterKey) throws NoSuchAlgorithmException {
+        byte[][] roundKeys = new byte[ROUNDS][KEY_SIZE / ROUNDS];
+        
+        // Start with the master key and a counter
+        byte[] currentKey = masterKey.clone();
+        byte[] counter = new byte[4]; // 32-bit counter
+        
+        for (int round = 0; round < ROUNDS; round++) {
+            // Update the counter
+            ByteBuffer.wrap(counter).putInt(round);
+            
+            // Create input for key derivation
+            byte[] input = new byte[currentKey.length + counter.length];
+            System.arraycopy(currentKey, 0, input, 0, currentKey.length);
+            System.arraycopy(counter, 0, input, currentKey.length, counter.length);
+            
+            // Generate the round key using SHA-256
+            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+            byte[] hash = sha256.digest(input);
+            
+            // Extract a portion for this round's key
+            System.arraycopy(hash, 0, roundKeys[round], 0, KEY_SIZE / ROUNDS);
+            
+            // Update the current key for the next round
+            currentKey = hash;
+        }
+        
+        return roundKeys;
+    }
+    
+    /**
+     * Reverse the order of round keys for decryption
+     */
+    private void reverseRoundKeys(byte[][] roundKeys) {
+        for (int i = 0; i < roundKeys.length / 2; i++) {
+            byte[] temp = roundKeys[i];
+            roundKeys[i] = roundKeys[roundKeys.length - i - 1];
+            roundKeys[roundKeys.length - i - 1] = temp;
+        }
+    }
+    
+    /**
+     * Increment the counter for CTR mode
+     */
+    private void incrementCounter(byte[] counter) {
+        for (int i = counter.length - 1; i >= 0; i--) {
+            if (++counter[i] != 0) {
+                break;
+            }
+        }
+    }
+    
+    /**
+     * Derive a key from a password and salt
+     */
+    private byte[] deriveKey(String password, byte[] salt) throws NoSuchAlgorithmException {
+        // A simple key derivation function based on PBKDF2 principles
+        // In a real implementation, use a proper KDF like PBKDF2, bcrypt, or Argon2
+        
+        byte[] passwordBytes = password.getBytes(StandardCharsets.UTF_8);
+        
+        // Combine password and salt
+        byte[] combined = new byte[passwordBytes.length + salt.length];
+        System.arraycopy(passwordBytes, 0, combined, 0, passwordBytes.length);
+        System.arraycopy(salt, 0, combined, passwordBytes.length, salt.length);
+        
+        // Apply multiple rounds of hashing (simulating PBKDF2)
+        MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+        byte[] key = combined;
+        
+        // Perform multiple iterations
+        for (int i = 0; i < 10000; i++) {
+            key = sha256.digest(key);
+        }
+        
+        // Ensure the key is the right size
+        if (key.length > KEY_SIZE) {
+            byte[] resizedKey = new byte[KEY_SIZE];
+            System.arraycopy(key, 0, resizedKey, 0, KEY_SIZE);
+            return resizedKey;
+        } else if (key.length < KEY_SIZE) {
+            // If the key is too short, duplicate it until it's long enough
+            byte[] extendedKey = new byte[KEY_SIZE];
+            for (int i = 0; i < KEY_SIZE; i++) {
+                extendedKey[i] = key[i % key.length];
+            }
+            return extendedKey;
+        } else {
+            return key;
+        }
+    }
+    
+    /**
+     * Add PKCS#7 padding to the data
+     */
+    private byte[] padData(byte[] data) {
+        int paddingLength = BLOCK_SIZE - (data.length % BLOCK_SIZE);
+        if (paddingLength == 0) {
+            paddingLength = BLOCK_SIZE; // Add a full block if data is already aligned
+        }
+        
+        byte[] padded = new byte[data.length + paddingLength];
+        System.arraycopy(data, 0, padded, 0, data.length);
+        
+        // Fill padding bytes with the padding length value
+        Arrays.fill(padded, data.length, padded.length, (byte) paddingLength);
+        
+        return padded;
+    }
+    
+    /**
+     * Remove PKCS#7 padding from the data
+     */
+    private byte[] unpadData(byte[] paddedData) {
+        // Get the padding length from the last byte
+        int paddingLength = paddedData[paddedData.length - 1] & 0xFF;
+        
+        // Verify padding (all padding bytes should have the same value)
+        for (int i = paddedData.length - paddingLength; i < paddedData.length; i++) {
+            if ((paddedData[i] & 0xFF) != paddingLength) {
+                throw new IllegalArgumentException("Invalid padding");
+            }
+        }
+        
+        // Remove padding
+        byte[] unpaddedData = new byte[paddedData.length - paddingLength];
+        System.arraycopy(paddedData, 0, unpaddedData, 0, unpaddedData.length);
+        
+        return unpaddedData;
+    }
+    
+    /**
+     * Main method for demonstration
+     */
+    public static void main(String[] args) {
+        try {
+            // Create a cipher with a password and mode
+            CustomFeistelCipher cipher = new CustomFeistelCipher("MySecretPassword123", Mode.CBC);
+            
+            // Original message
+            String originalMessage = "This is a test message for our custom Feistel cipher implementation.";
+            System.out.println("Original message: " + originalMessage);
+            
+            // Encrypt
+            String encryptedBase64 = cipher.encrypt(originalMessage);
+            System.out.println("\nEncrypted (Base64): " + encryptedBase64);
+            
+            // Decrypt
+            String decryptedMessage = cipher.decrypt(encryptedBase64);
+            System.out.println("\nDecrypted: " + decryptedMessage);
+            
+            // Verify
+            boolean success = originalMessage.equals(decryptedMessage);
+            System.out.println("\nDecryption successful: " + success);
+            
+        } catch (Exception e) {
+            System.err.println("Error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+}
