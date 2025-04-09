@@ -1,0 +1,398 @@
+package encryption;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.util.Arrays;
+import java.util.Base64;
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.KeyGenerator;
+import javax.crypto.NoSuchPaddingException;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+
+/**
+ * HybridEncryption - A secure encryption system implementing hybrid encryption
+ * 
+ * This implementation uses:
+ * - AES-256-GCM for symmetric encryption (data encryption)
+ * - RSA-2048 for asymmetric encryption (key exchange)
+ * - SHA-256 for hashing
+ * - HMAC for message authentication
+ * - Secure padding and IV generation
+ */
+public class HybridEncryption {
+
+    private static final String RSA_ALGORITHM = "RSA";
+    private static final String AES_ALGORITHM = "AES";
+    private static final String AES_TRANSFORMATION = "AES/GCM/NoPadding";
+    private static final int RSA_KEY_SIZE = 2048;
+    private static final int AES_KEY_SIZE = 256;
+    private static final int GCM_IV_LENGTH = 12;
+    private static final int GCM_TAG_LENGTH = 128;
+    
+    private KeyPair rsaKeyPair;
+    private SecretKey masterKey;
+    private SecureRandom secureRandom;
+    
+    /**
+     * Initialize the encryption system
+     */
+    public HybridEncryption() throws NoSuchAlgorithmException {
+        this.secureRandom = new SecureRandom();
+        generateRSAKeyPair();
+        generateMasterKey();
+    }
+    
+    /**
+     * Generate RSA key pair for asymmetric encryption
+     */
+    private void generateRSAKeyPair() throws NoSuchAlgorithmException {
+        KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(RSA_ALGORITHM);
+        keyPairGenerator.initialize(RSA_KEY_SIZE, secureRandom);
+        this.rsaKeyPair = keyPairGenerator.generateKeyPair();
+        System.out.println("RSA key pair generated");
+    }
+    
+    /**
+     * Generate master AES key for symmetric encryption
+     */
+    private void generateMasterKey() throws NoSuchAlgorithmException {
+        KeyGenerator keyGenerator = KeyGenerator.getInstance(AES_ALGORITHM);
+        keyGenerator.init(AES_KEY_SIZE, secureRandom);
+        this.masterKey = keyGenerator.generateKey();
+        System.out.println("Master AES key generated");
+    }
+    
+    /**
+     * Get the public key (for distribution to other parties)
+     */
+    public PublicKey getPublicKey() {
+        return rsaKeyPair.getPublic();
+    }
+    
+    /**
+     * Get the private key (keep this secret!)
+     */
+    public PrivateKey getPrivateKey() {
+        return rsaKeyPair.getPrivate();
+    }
+    
+    /**
+     * Encrypt a message using the hybrid approach
+     * 
+     * @param plaintext The message to encrypt
+     * @param recipientPublicKey The recipient's public key
+     * @return EncryptedData object containing all components needed for decryption
+     */
+    public EncryptedData encrypt(String plaintext, PublicKey recipientPublicKey) 
+            throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, 
+            InvalidAlgorithmParameterException, IllegalBlockSizeException, BadPaddingException {
+        
+        // 1. Generate a random session key for this message
+        SecretKey sessionKey = generateSessionKey();
+        
+        // 2. Encrypt the plaintext with the session key (AES-GCM)
+        byte[] iv = generateRandomIV();
+        byte[] encryptedData = encryptWithAESGCM(plaintext.getBytes(StandardCharsets.UTF_8), 
+                                                sessionKey, iv);
+        
+        // 3. Encrypt the session key with recipient's public key (RSA)
+        byte[] encryptedSessionKey = encryptWithRSA(sessionKey.getEncoded(), recipientPublicKey);
+        
+        // 4. Compute HMAC for message authentication
+        byte[] hmac = computeHMAC(encryptedData, masterKey.getEncoded());
+        
+        // 5. Combine all components
+        return new EncryptedData(encryptedData, encryptedSessionKey, iv, hmac);
+    }
+    
+    /**
+     * Decrypt a message using the hybrid approach
+     * 
+     * @param encryptedData The EncryptedData object containing all encryption components
+     * @param privateKey The recipient's private key
+     * @return The decrypted plaintext
+     */
+    public String decrypt(EncryptedData encryptedData, PrivateKey privateKey) 
+            throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, 
+            InvalidAlgorithmParameterException, IllegalBlockSizeException, BadPaddingException {
+        
+        // 1. Decrypt the session key with private key (RSA)
+        byte[] sessionKeyBytes = decryptWithRSA(encryptedData.getEncryptedSessionKey(), privateKey);
+        SecretKey sessionKey = new SecretKeySpec(sessionKeyBytes, AES_ALGORITHM);
+        
+        // 2. Verify HMAC (message authentication)
+        byte[] computedHmac = computeHMAC(encryptedData.getEncryptedData(), masterKey.getEncoded());
+        if (!MessageDigest.isEqual(computedHmac, encryptedData.getHmac())) {
+            throw new SecurityException("HMAC verification failed - message may have been tampered with");
+        }
+        
+        // 3. Decrypt the data with the session key (AES-GCM)
+        byte[] decryptedData = decryptWithAESGCM(encryptedData.getEncryptedData(), 
+                                               sessionKey, encryptedData.getIv());
+        
+        // 4. Return the plaintext
+        return new String(decryptedData, StandardCharsets.UTF_8);
+    }
+    
+    /**
+     * Generate a random session key
+     */
+    private SecretKey generateSessionKey() throws NoSuchAlgorithmException {
+        KeyGenerator keyGenerator = KeyGenerator.getInstance(AES_ALGORITHM);
+        keyGenerator.init(AES_KEY_SIZE, secureRandom);
+        return keyGenerator.generateKey();
+    }
+    
+    /**
+     * Generate a random initialization vector (IV)
+     */
+    private byte[] generateRandomIV() {
+        byte[] iv = new byte[GCM_IV_LENGTH];
+        secureRandom.nextBytes(iv);
+        return iv;
+    }
+    
+    /**
+     * Encrypt data using AES in GCM mode
+     */
+    private byte[] encryptWithAESGCM(byte[] data, SecretKey key, byte[] iv) 
+            throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, 
+            InvalidAlgorithmParameterException, IllegalBlockSizeException, BadPaddingException {
+        
+        Cipher cipher = Cipher.getInstance(AES_TRANSFORMATION);
+        GCMParameterSpec parameterSpec = new GCMParameterSpec(GCM_TAG_LENGTH, iv);
+        cipher.init(Cipher.ENCRYPT_MODE, key, parameterSpec);
+        
+        return cipher.doFinal(data);
+    }
+    
+    /**
+     * Decrypt data using AES in GCM mode
+     */
+    private byte[] decryptWithAESGCM(byte[] encryptedData, SecretKey key, byte[] iv) 
+            throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, 
+            InvalidAlgorithmParameterException, IllegalBlockSizeException, BadPaddingException {
+        
+        Cipher cipher = Cipher.getInstance(AES_TRANSFORMATION);
+        GCMParameterSpec parameterSpec = new GCMParameterSpec(GCM_TAG_LENGTH, iv);
+        cipher.init(Cipher.DECRYPT_MODE, key, parameterSpec);
+        
+        return cipher.doFinal(encryptedData);
+    }
+    
+    /**
+     * Encrypt data using RSA
+     */
+    private byte[] encryptWithRSA(byte[] data, PublicKey publicKey) 
+            throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, 
+            IllegalBlockSizeException, BadPaddingException {
+        
+        Cipher cipher = Cipher.getInstance(RSA_ALGORITHM);
+        cipher.init(Cipher.ENCRYPT_MODE, publicKey);
+        
+        return cipher.doFinal(data);
+    }
+    
+    /**
+     * Decrypt data using RSA
+     */
+    private byte[] decryptWithRSA(byte[] encryptedData, PrivateKey privateKey) 
+            throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, 
+            IllegalBlockSizeException, BadPaddingException {
+        
+        Cipher cipher = Cipher.getInstance(RSA_ALGORITHM);
+        cipher.init(Cipher.DECRYPT_MODE, privateKey);
+        
+        return cipher.doFinal(encryptedData);
+    }
+    
+    /**
+     * Compute HMAC for message authentication
+     */
+    private byte[] computeHMAC(byte[] data, byte[] key) throws NoSuchAlgorithmException {
+        // A simple HMAC implementation using SHA-256
+        // In a production environment, you might use javax.crypto.Mac
+        
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        
+        // Prepare key (if longer than block size, hash it)
+        byte[] processedKey = key;
+        if (key.length > 64) {
+            processedKey = digest.digest(key);
+            digest.reset();
+        }
+        
+        // Create padded keys
+        byte[] outerKeyPad = new byte[64];
+        byte[] innerKeyPad = new byte[64];
+        Arrays.fill(outerKeyPad, (byte) 0x5c);
+        Arrays.fill(innerKeyPad, (byte) 0x36);
+        
+        // XOR keys with pads
+        for (int i = 0; i < processedKey.length; i++) {
+            outerKeyPad[i] ^= processedKey[i];
+            innerKeyPad[i] ^= processedKey[i];
+        }
+        
+        // Inner hash
+        digest.update(innerKeyPad);
+        byte[] innerHash = digest.digest(data);
+        digest.reset();
+        
+        // Outer hash
+        digest.update(outerKeyPad);
+        return digest.digest(innerHash);
+    }
+    
+    /**
+     * Container class for all components of encrypted data
+     */
+    public static class EncryptedData {
+        private final byte[] encryptedData;
+        private final byte[] encryptedSessionKey;
+        private final byte[] iv;
+        private final byte[] hmac;
+        
+        public EncryptedData(byte[] encryptedData, byte[] encryptedSessionKey, byte[] iv, byte[] hmac) {
+            this.encryptedData = encryptedData;
+            this.encryptedSessionKey = encryptedSessionKey;
+            this.iv = iv;
+            this.hmac = hmac;
+        }
+        
+        public byte[] getEncryptedData() {
+            return encryptedData;
+        }
+        
+        public byte[] getEncryptedSessionKey() {
+            return encryptedSessionKey;
+        }
+        
+        public byte[] getIv() {
+            return iv;
+        }
+        
+        public byte[] getHmac() {
+            return hmac;
+        }
+        
+        /**
+         * Serialize all components to a single byte array
+         */
+        public byte[] serialize() {
+            ByteBuffer buffer = ByteBuffer.allocate(
+                    4 + encryptedData.length + 
+                    4 + encryptedSessionKey.length + 
+                    4 + iv.length + 
+                    4 + hmac.length);
+            
+            // Write each component with its length prefix
+            buffer.putInt(encryptedData.length);
+            buffer.put(encryptedData);
+            
+            buffer.putInt(encryptedSessionKey.length);
+            buffer.put(encryptedSessionKey);
+            
+            buffer.putInt(iv.length);
+            buffer.put(iv);
+            
+            buffer.putInt(hmac.length);
+            buffer.put(hmac);
+            
+            return buffer.array();
+        }
+        
+        /**
+         * Deserialize from a byte array
+         */
+        public static EncryptedData deserialize(byte[] serialized) {
+            ByteBuffer buffer = ByteBuffer.wrap(serialized);
+            
+            // Read each component
+            int encryptedDataLength = buffer.getInt();
+            byte[] encryptedData = new byte[encryptedDataLength];
+            buffer.get(encryptedData);
+            
+            int encryptedSessionKeyLength = buffer.getInt();
+            byte[] encryptedSessionKey = new byte[encryptedSessionKeyLength];
+            buffer.get(encryptedSessionKey);
+            
+            int ivLength = buffer.getInt();
+            byte[] iv = new byte[ivLength];
+            buffer.get(iv);
+            
+            int hmacLength = buffer.getInt();
+            byte[] hmac = new byte[hmacLength];
+            buffer.get(hmac);
+            
+            return new EncryptedData(encryptedData, encryptedSessionKey, iv, hmac);
+        }
+        
+        /**
+         * Convert to Base64 for easy transport
+         */
+        public String toBase64() {
+            return Base64.getEncoder().encodeToString(serialize());
+        }
+        
+        /**
+         * Create from Base64 string
+         */
+        public static EncryptedData fromBase64(String base64) {
+            byte[] serialized = Base64.getDecoder().decode(base64);
+            return deserialize(serialized);
+        }
+    }
+    
+    /**
+     * Main method for demonstration
+     */
+    public static void main(String[] args) {
+        try {
+            // Create a new encryption system
+            HybridEncryption encryptor = new HybridEncryption();
+            
+            // Original message
+            String originalMessage = "This is a top secret message that needs strong encryption!";
+            System.out.println("Original message: " + originalMessage);
+            
+            // Simulate sender encrypting a message for recipient
+            // In real usage, recipient's public key would be obtained securely
+            PublicKey recipientPublicKey = encryptor.getPublicKey();
+            EncryptedData encrypted = encryptor.encrypt(originalMessage, recipientPublicKey);
+            
+            // Convert to transportable form
+            String transportableForm = encrypted.toBase64();
+            System.out.println("\nEncrypted message (Base64): " + transportableForm);
+            
+            // Simulate recipient receiving and decrypting the message
+            // In real usage, recipient would use their own private key
+            PrivateKey recipientPrivateKey = encryptor.getPrivateKey();
+            EncryptedData receivedData = EncryptedData.fromBase64(transportableForm);
+            String decryptedMessage = encryptor.decrypt(receivedData, recipientPrivateKey);
+            
+            System.out.println("\nDecrypted message: " + decryptedMessage);
+            
+            // Verify the decryption was successful
+            boolean success = originalMessage.equals(decryptedMessage);
+            System.out.println("\nDecryption successful: " + success);
+            
+        } catch (Exception e) {
+            System.err.println("Encryption error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+}
